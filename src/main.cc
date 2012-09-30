@@ -16,7 +16,16 @@
 
 #include <avr/io.h>
 
-#include "delay.h"
+#define __devboard_mine__ 1
+
+#if defined(ARDUINO)
+#  define __led13_support
+#  define delay_100us(x) delay(x)
+#elif defined(__devboard_mine__)
+# include "delay.h"
+#else
+#  warning "no target board defined"
+#endif
 
 #define pbcl(port, b) do { port &= (uint8_t)~(_BV(b)); } while (0)
 #define pbst(port, b) do { port |= _BV(b); } while (0)
@@ -50,8 +59,15 @@ static void flashled(int count, int hdelay) {
 #endif // __led13_support
 
 
-#define TLC_PORT PORTA
-#define TLC_DDR DDRA
+#if defined(ARDUINO)
+#  define TLC_PORT PORTB
+#  define TLC_DDR DDRB
+#elif defined(__devboard_mine__)
+#  define TLC_PORT PORTA
+#  define TLC_DDR DDRA
+#else
+#  warning "no target board defined"
+#endif
 
 #define TLC_0_SIN   0
 #define TLC_1_SCLK  1
@@ -61,9 +77,15 @@ static void flashled(int count, int hdelay) {
 #define TLC_5_SOUT  xx
 #define TLC_6_XERR  xx
 
-#define ROWSEL_DDR DDRC
-#define ROWSEL_PORT PORTC
-
+#if defined(ARDUINO)
+#  define ROWSEL_DDR DDRD
+#  define ROWSEL_PORT PORTD
+#elif defined(__devboard_mine__)
+#  define ROWSEL_DDR DDRC
+#  define ROWSEL_PORT PORTC
+#else
+#  warning "no target board defined"
+#endif
 
 #define GSBPP 12
 #define GSPWMTOP 0xfff
@@ -95,7 +117,7 @@ uint16_t gsdata[][16] = {
 
 void setup() {
 
-	led13_init();
+  led13_init();
 
   // row selectors all outputs
   ROWSEL_DDR = 0xff;
@@ -192,8 +214,11 @@ void loop() {
   }
 }
 
+#if !defined(ARDUINO)
+
 int main(int argc, char** argv) {
 	setup();
 	loop();
 }
 
+#endif
