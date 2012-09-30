@@ -15,17 +15,9 @@
 //
 
 #include <avr/io.h>
+#include <avr/interrupt.h>
 
 #define __devboard_mine__ 1
-
-#if defined(ARDUINO)
-#  define __led13_support
-#  define delay_100us(x) delay(x)
-#elif defined(__devboard_mine__)
-# include "delay.h"
-#else
-#  warning "no target board defined"
-#endif
 
 #define pbcl(port, b) do { port &= (uint8_t)~(_BV(b)); } while (0)
 #define pbst(port, b) do { port |= _BV(b); } while (0)
@@ -34,48 +26,31 @@
 #define pulse(port, b) do { pbst(port, b); pbcl(port, b); } while (0);
 
 
-#ifdef __led13_support
-#  define LEDDDR DDRB
-#  define LEDPORT PORTB
-#  define LEDPIN 5
-
-static void led13_init() {
-	  pbst(LEDDDR, LEDPIN);
-}
-
-// useful for visual or logic analyzer identification
-static void flashled(int count, int hdelay) {
-  for (int i = 0; i < count; ++i) {
-    pbst(LEDPORT, LEDPIN);
-    delay_100us(hdelay);
-    pbcl(LEDPORT, LEDPIN);
-    delay_100us(hdelay);
-  }
-}
-
-#else
-#  define led13_init() while(0);
-#  define flashled(count, delay) while(0);
-#endif // __led13_support
-
-
 #if defined(ARDUINO)
 #  define TLC_PORT PORTB
 #  define TLC_DDR DDRB
+#  define TLC_0_GSCLK           0
+#  define TLC_1_XLAT            1 // latches data sent (not the same as SPI SS' going high)
+#  define TLC_2_BLANK           2 // resets GS counter (conflicts SPI SS', but we are not using it)
+#  define TLC_3_SIN___SPI_MOSI  3
+#  define TLC_4_SOUT__SPI_MISO  4
+#  define TLC_5_SCLK__SPI_SCK   5
 #elif defined(__devboard_mine__)
-#  define TLC_PORT PORTA
-#  define TLC_DDR DDRA
+#  define TLC_PORT PORTB
+#  define TLC_DDR DDRB
+#  define TLC_0_GSCLK           1 // align with CLKO
+#  define TLC_1_XLAT            3 // latches data sent (not the same as SPI SS' going high)
+#  define TLC_2_BLANK           4 // resets GS counter (conflicts SPI SS', but we are not using it)
+#  define TLC_3_SIN___SPI_MOSI  5
+#  define TLC_4_SOUT__SPI_MISO  6
+#  define TLC_5_SCLK__SPI_SCK   7
 #else
 #  warning "no target board defined"
 #endif
 
-#define TLC_0_SIN   0
-#define TLC_1_SCLK  1
-#define TLC_2_XLAT  2
-#define TLC_3_BLANK 3
-#define TLC_4_GSCLK 4
-#define TLC_5_SOUT  xx
-#define TLC_6_XERR  xx
+#define SPI_DD     TLC_DDR
+#define SPI_MOSI   TLC_3_SIN___SPI_MOSI
+#define SPI_SCK    TLC_5_SCLK__SPI_SCK
 
 #if defined(ARDUINO)
 #  define ROWSEL_DDR DDRD
@@ -87,138 +62,182 @@ static void flashled(int count, int hdelay) {
 #  warning "no target board defined"
 #endif
 
-#define GSBPP 12
-#define GSPWMTOP 0xfff
 #define ROWCOUNT 8
-#define PIXELSPERROW 16
 
-static int8_t pci = -1;
-static int8_t btci = GSBPP-1;
-static uint16_t pixel = 0;
-static uint8_t rowi = 4;
-static uint16_t pwmi = 0;
+static volatile int8_t pci = -1;
+static volatile uint8_t rowi = 4;
 
 
-#define FACTOR 128
+#define FACTOR 1
 
-uint16_t gsdata[][16] = {
+#define DATAROWS 8
 
-  {
-    FACTOR*7, FACTOR*6, FACTOR*5, FACTOR*4, FACTOR*3, FACTOR*2, FACTOR*1, FACTOR*0,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-  },
-
-  {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    FACTOR*0, FACTOR*1, FACTOR*2, FACTOR*3, FACTOR*4, FACTOR*5, FACTOR*6, FACTOR*7,
-  }
-
+uint16_t gsdataf[][DATAROWS][2] = {
+    { { 0x000, 7*FACTOR, }, { 0x000, 6*FACTOR, }, { 0x000, 5*FACTOR, }, { 0x000, 4*FACTOR, }, { 0x000, 3*FACTOR, }, { 0x000, 2*FACTOR, }, { 0x000, 1*FACTOR, }, { 0x000, 0*FACTOR, }, },
+    { { 0x000, 7*FACTOR, }, { 0x000, 6*FACTOR, }, { 0x000, 5*FACTOR, }, { 0x000, 4*FACTOR, }, { 0x000, 3*FACTOR, }, { 0x000, 2*FACTOR, }, { 0x000, 1*FACTOR, }, { 0x000, 0*FACTOR, }, },
+    { { 0*FACTOR, 0x000, }, { 1*FACTOR, 0x000, }, { 2*FACTOR, 0x000, }, { 3*FACTOR, 0x000, }, { 4*FACTOR, 0x000, }, { 5*FACTOR, 0x000, }, { 6*FACTOR, 0x000, }, { 7*FACTOR, 0x000, }, },
+    { { 0*FACTOR, 0x000, }, { 1*FACTOR, 0x000, }, { 2*FACTOR, 0x000, }, { 3*FACTOR, 0x000, }, { 4*FACTOR, 0x000, }, { 5*FACTOR, 0x000, }, { 6*FACTOR, 0x000, }, { 7*FACTOR, 0x000, }, },
+    { { 0x000, 7*FACTOR, }, { 0x000, 6*FACTOR, }, { 0x000, 5*FACTOR, }, { 0x000, 4*FACTOR, }, { 0x000, 3*FACTOR, }, { 0x000, 2*FACTOR, }, { 0x000, 1*FACTOR, }, { 0x000, 0*FACTOR, }, },
+    { { 0x000, 7*FACTOR, }, { 0x000, 6*FACTOR, }, { 0x000, 5*FACTOR, }, { 0x000, 4*FACTOR, }, { 0x000, 3*FACTOR, }, { 0x000, 2*FACTOR, }, { 0x000, 1*FACTOR, }, { 0x000, 0*FACTOR, }, },
+    { { 0*FACTOR, 0x000, }, { 1*FACTOR, 0x000, }, { 2*FACTOR, 0x000, }, { 3*FACTOR, 0x000, }, { 4*FACTOR, 0x000, }, { 5*FACTOR, 0x000, }, { 6*FACTOR, 0x000, }, { 7*FACTOR, 0x000, }, },
+    { { 0*FACTOR, 0x000, }, { 1*FACTOR, 0x000, }, { 2*FACTOR, 0x000, }, { 3*FACTOR, 0x000, }, { 4*FACTOR, 0x000, }, { 5*FACTOR, 0x000, }, { 6*FACTOR, 0x000, }, { 7*FACTOR, 0x000, }, },
 };
 
-void setup() {
+uint8_t gsdata[DATAROWS][24] = { };
 
-  led13_init();
+static void convert16to12packed(uint16_t scale) {
+  for (uint8_t r = 0; r < DATAROWS; ++r) {
+
+    for (uint8_t ppi = 0; ppi < 4; ++ppi) {
+
+      /*
+
+      ppi = 0:
+      0 -> 0 h  0 m
+      1 -> 0 l  1 h
+      2 -> 1 m  1 l
+
+      ppi = 1:
+      3 -> 2 h  2 m
+      4 -> 2 l  3 h
+      5 -> 3 m  3 l
+
+      ...
+
+      */
+
+      uint16_t pv1;
+      uint16_t pv2;
+
+
+      // green, (msb 1st)
+
+      pv1 = gsdataf[r][8-(ppi*2+0)-1][1] * scale;
+      pv2 = gsdataf[r][8-(ppi*2+1)-1][1] * scale;
+
+      gsdata[r][ 0 + ppi*3 + 0] = (uint8_t)(((pv1 & 0xff0) >> 4)                        );
+      gsdata[r][ 0 + ppi*3 + 1] = (uint8_t)(((pv1 & 0x00f) << 4) | ((pv2 & 0xf00) >> 8) );
+      gsdata[r][ 0 + ppi*3 + 2] = (uint8_t)(                       ((pv2 & 0x0ff) >> 0) );
+
+
+      // red
+
+      pv1 = gsdataf[r][8-(ppi*2+0)-1][0] * scale;
+      pv2 = gsdataf[r][8-(ppi*2+1)-1][0] * scale;
+
+      gsdata[r][12 + ppi*3 + 0] = (uint8_t)(((pv1 & 0xff0) >> 4)                        );
+      gsdata[r][12 + ppi*3 + 1] = (uint8_t)(((pv1 & 0x00f) << 4) | ((pv2 & 0xf00) >> 8) );
+      gsdata[r][12 + ppi*3 + 2] = (uint8_t)(                       ((pv2 & 0x0ff) >> 0) );
+
+    }
+  }
+}
+
+void setup() {
 
   // row selectors all outputs
   ROWSEL_DDR = 0xff;
 
 
   // row data controller (tlc5940) data loading serial interface
-  TLC_DDR |= _BV(TLC_0_SIN) | _BV(TLC_1_SCLK) | _BV(TLC_2_XLAT);
+  TLC_DDR |= _BV(TLC_3_SIN___SPI_MOSI) | _BV(TLC_5_SCLK__SPI_SCK) | _BV(TLC_1_XLAT);
 
   // row data controller (tlc5940) pwm controller
-  TLC_DDR |= _BV(TLC_3_BLANK) | _BV(TLC_4_GSCLK);
+  TLC_DDR |= _BV(TLC_2_BLANK) | _BV(TLC_0_GSCLK);
 
 
   ROWSEL_PORT = 0xff; // active low, all disabled at start
 
-  pbst(TLC_PORT, TLC_3_BLANK); // blank stuff until we setup
+  pbst(TLC_PORT, TLC_2_BLANK); // blank stuff until we setup
 
   // row data controller pins are active high
-  TLC_PORT &= (uint8_t)~(_BV(TLC_0_SIN) | _BV(TLC_1_SCLK) | _BV(TLC_2_XLAT) | _BV(TLC_4_GSCLK));
+  TLC_PORT &= (uint8_t)~(_BV(TLC_3_SIN___SPI_MOSI) | _BV(TLC_5_SCLK__SPI_SCK) | _BV(TLC_1_XLAT) | _BV(TLC_0_GSCLK));
 
-  flashled(5, 20);
 
-  for (int8_t i = PIXELSPERROW; i >= 0; --i) {
+  // set mosi sck as output // already done by TLC setup
+  // SPI_DD |= _BV(SPI_MOSI) | _BV(SPI_SCK);
 
-    uint16_t q = gsdata[0][i];
+  // SPI enabled, MSB first data order, master mode, normal clock polarity & phase, maximum clock rate, interrupt mode
+  SPCR = _BV(MSTR) | _BV(SPE) | _BV(SPIE);
 
-    for (uint8_t b = 0; b < GSBPP; ++b) {
-      if ((q & (1<<(GSBPP-1))) != 0) {
-        pbst(TLC_PORT, TLC_0_SIN);
-      } else {
-        pbcl(TLC_PORT, TLC_0_SIN);
-      }
+  // double the speed since we're the master.
+  SPSR |= SPI2X;
 
-      pulse(TLC_PORT, TLC_1_SCLK);
 
-      q<<=1;
-    }
-  }
+  convert16to12packed(127);
 
-  pulse(TLC_PORT, TLC_2_XLAT);
+  // reset byte index, and initiate the SPI txfer
+  pci = 24 - 1;
+  SPDR = gsdata[rowi%DATAROWS][24-pci-1];
 
-  pbcl(TLC_PORT, TLC_3_BLANK);
+  // allow 1st GS cycle to begin
+  pbcl(TLC_PORT, TLC_2_BLANK);
+
+
+  // OC0A not connected, OC0B not connected, CTC (clear timer on compare match) waveform generation mode
+  TCCR0A = _BV(WGM01);
+  // timer clock is i/o clk / 1024
+  TCCR0B = _BV(CS02) | _BV(CS00);
+  // set TOP to 3, so 4096 i/o clocks are counted between our interrupts
+  OCR0A = 3;
+  // enable interrupt from compare match on channel A
+  TIMSK0 = _BV(OCIE0A);
 
 }
+
+ISR(TIMER0_COMPA_vect) {
+
+  pbst(TLC_PORT, TLC_2_BLANK);
+
+  pulse(TLC_PORT, TLC_1_XLAT); // latch the data we've sent for the next row
+  ROWSEL_PORT = ~(1<<rowi);    // enable the row we shifted data for
+
+  rowi = (rowi + 1) % ROWCOUNT;
+
+  pci = 24 - 1; // 16 * 12 / 8
+  SPDR = gsdata[rowi%DATAROWS][24-pci-1]; // initiate SPI xfer of next row's data
+
+  // reset GS counter
+  pbcl(TLC_PORT, TLC_2_BLANK);
+
+}
+
+ISR(SPI_STC_vect) {
+
+  pci--;
+
+  if (pci >= 0) {
+    SPDR = gsdata[rowi%DATAROWS][24-pci-1];
+  }
+}
+
 
 void loop() {
 
   // we never return from the 1st call to loop()
 
-  pwmi = GSPWMTOP;
+  uint16_t scale = 1;
+  int8_t dir = 1;
 
   while (1) {
 
-    // TODO: offload this to SPI hardware
-    if (pci >= 0) {
+    convert16to12packed(scale);
 
-      if ((pixel & (1<<(GSBPP-1))) != 0) {
-        pbst(TLC_PORT, TLC_0_SIN);
-      } else {
-        pbcl(TLC_PORT, TLC_0_SIN);
-      }
-      pulse(TLC_PORT, TLC_1_SCLK);
-
-      pixel <<= 1;
-      btci--;
-
-      if (btci < 0) {
-        pci--;
-        pixel = gsdata[rowi%2][pci];
-        btci = GSBPP-1;
-      }
-    }
-
-    pulse(TLC_PORT, TLC_4_GSCLK);
-
-    if (pwmi == 0) {
-      pwmi = GSPWMTOP;
-
-      // new GS data has been shifted, latch it
-      pulse(TLC_PORT, TLC_2_XLAT);
-
-      // reset GS counter
-      pulse(TLC_PORT, TLC_3_BLANK);
-
-      rowi = (rowi + 1) % ROWCOUNT;
-
-      pci = PIXELSPERROW - 1;
-      pixel = gsdata[rowi%2][pci];
-
-      ROWSEL_PORT = ~(1<<rowi);
-
-    } else {
-      pwmi--;
-    }
+    scale += dir;
+    if (scale >= 510) dir = -1;
+    if (scale <= 2) dir = 1;
   }
 }
 
 #if !defined(ARDUINO)
 
 int main(int argc, char** argv) {
-	setup();
-	loop();
+
+  setup();
+
+  sei();
+
+  loop();
 }
 
 #endif
