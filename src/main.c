@@ -16,6 +16,7 @@
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <avr/wdt.h>
 
 #define __devboard_mine__ 1
 
@@ -85,7 +86,7 @@ uint16_t gsdataf[][DATAROWS][2] = {
 
 uint8_t gsdata[DATAROWS][24] = { };
 
-static void convert16to12packed(uint16_t scale) {
+static void convert16to12packed(uint16_t scale, int8_t orientation) {
   for (uint8_t r = 0; r < DATAROWS; ++r) {
 
     for (uint8_t ppi = 0; ppi < 4; ++ppi) {
@@ -106,14 +107,22 @@ static void convert16to12packed(uint16_t scale) {
 
       */
 
+	  uint8_t col1 = ppi*2+0;
+	  uint8_t col2 = ppi*2+1;
+
+      if (orientation) {
+		  col1 = 8-col1-1;
+		  col2 = 8-col2-1;
+      }
+
       uint16_t pv1;
       uint16_t pv2;
 
 
       // green, (msb 1st)
 
-      pv1 = gsdataf[r][8-(ppi*2+0)-1][1] * scale;
-      pv2 = gsdataf[r][8-(ppi*2+1)-1][1] * scale;
+      pv1 = gsdataf[r][col1][1] * scale;
+      pv2 = gsdataf[r][col2][1] * scale;
 
       gsdata[r][ 0 + ppi*3 + 0] = (uint8_t)(((pv1 & 0xff0) >> 4)                        );
       gsdata[r][ 0 + ppi*3 + 1] = (uint8_t)(((pv1 & 0x00f) << 4) | ((pv2 & 0xf00) >> 8) );
@@ -122,8 +131,8 @@ static void convert16to12packed(uint16_t scale) {
 
       // red
 
-      pv1 = gsdataf[r][8-(ppi*2+0)-1][0] * scale;
-      pv2 = gsdataf[r][8-(ppi*2+1)-1][0] * scale;
+      pv1 = gsdataf[r][col1][0] * scale;
+      pv2 = gsdataf[r][col2][0] * scale;
 
       gsdata[r][12 + ppi*3 + 0] = (uint8_t)(((pv1 & 0xff0) >> 4)                        );
       gsdata[r][12 + ppi*3 + 1] = (uint8_t)(((pv1 & 0x00f) << 4) | ((pv2 & 0xf00) >> 8) );
@@ -157,18 +166,10 @@ void setup() {
   // set mosi sck as output // already done by TLC setup
   // SPI_DD |= _BV(SPI_MOSI) | _BV(SPI_SCK);
 
-  // SPI enabled, MSB first data order, master mode, normal clock polarity & phase, maximum clock rate, interrupt mode
+  // SPI enabled, MSB first data order, master mode, normal clock polarity & phase, maximum clock rate, no 2x, interrupt mode
   SPCR = _BV(MSTR) | _BV(SPE) | _BV(SPIE);
 
-  // double the speed since we're the master.
-  SPSR |= SPI2X;
-
-
-  convert16to12packed(127);
-
-  // reset byte index, and initiate the SPI txfer
-  pci = 24 - 1;
-  SPDR = gsdata[rowi%DATAROWS][24-pci-1];
+  convert16to12packed(127, 0);
 
   // allow 1st GS cycle to begin
   pbcl(TLC_PORT, TLC_2_BLANK);
@@ -218,16 +219,36 @@ void loop() {
 
   uint16_t scale = 1;
   int8_t dir = 1;
+  int8_t orientation = 0;
 
   while (1) {
 
-    convert16to12packed(scale);
+    convert16to12packed(scale, orientation);
 
     scale += dir;
-    if (scale >= 510) dir = -1;
-    if (scale <= 2) dir = 1;
+    if (scale >= 510) {
+    	dir = -1;
+    }
+    if (scale <= 2) {
+    	dir = 1;
+    	orientation = !orientation;
+    }
   }
 }
+
+
+uint8_t resetflags __attribute__((section(".noinit")));
+
+void save_and_clear_mcusr()
+	__attribute__((section(".init3")))
+	__attribute__((naked));
+
+void save_and_clear_mcusr() {
+	resetflags = MCUSR;
+	MCUSR = 0;
+	wdt_disable();
+}
+
 
 #if !defined(ARDUINO)
 
